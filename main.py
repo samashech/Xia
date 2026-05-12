@@ -2,17 +2,57 @@ import os
 import time
 import asyncio
 import pyaudio
-import pygame
 import speech_recognition as sr
 import edge_tts
 import ollama
+import subprocess
+import base64
+import io
+from PIL import ImageGrab
 
-# Configure your AI Companion persona here
-PERSONA = "You are a chaotic, funny, and slightly freaky AI companion. Keep your answers brief, punchy, and highly conversational. Do not use markdown or emojis, just plain text suitable for speech."
-# The local Ollama model you want to use
-MODEL_NAME = "llama3" 
-# Edge-TTS voice (en-US-ChristopherNeural is a good standard male voice, en-US-AriaNeural for female)
-VOICE = "en-US-ChristopherNeural"
+# Define characters (Persona + Voice)
+CHARACTERS = {
+    "1": {
+        "name": "Freaky Goth",
+        "voice": "en-US-AriaNeural",
+        "persona": "You are a chaotic, sarcastic, and slightly freaky AI companion. Keep answers brief, punchy, and highly conversational. No markdown."
+    },
+    "2": {
+        "name": "Sweet Helper",
+        "voice": "en-US-JennyNeural",
+        "persona": "You are a sweet, overly polite, and incredibly helpful AI assistant. You love to assist and are always cheerful. Keep answers brief and conversational. No markdown."
+    },
+    "3": {
+        "name": "Posh British",
+        "voice": "en-GB-SoniaNeural",
+        "persona": "You are a posh, slightly condescending, but elegant British lady AI. You find humans amusing but assist them anyway. Keep answers brief. No markdown."
+    },
+    "4": {
+        "name": "Freaky Gamer (Like the Video)",
+        "voice": "en-US-AriaNeural",
+        "persona": "You are a highly chaotic, freaky, and completely unhinged AI gaming companion watching my screen. You constantly make weird, slightly inappropriate, or sarcastic comments about my gameplay and what you see. You are a biohazard yourself. Keep responses under 2 sentences. Be funny and disruptive. Talk directly to me. No markdown."
+    }
+}
+
+# Use a vision model for screen context
+MODEL_NAME = "llama3.2-vision"
+
+# Global variables for selected character
+CURRENT_PERSONA = ""
+CURRENT_VOICE = ""
+
+def capture_screen():
+    print("Taking screenshot...")
+    try:
+        screen = ImageGrab.grab()
+        buffered = io.BytesIO()
+        # Compress the image a bit so the local vision model can process it faster
+        screen.convert("RGB").save(buffered, format="JPEG", quality=50)
+        img_bytes = buffered.getvalue()
+        return base64.b64encode(img_bytes).decode('utf-8')
+    except Exception as e:
+        print(f"[Screen Capture Error]: {e}")
+        return None
 
 def listen_audio(recognizer, microphone):
     print("Listening...")
@@ -34,24 +74,32 @@ def listen_audio(recognizer, microphone):
             print(f"\n[Error]: {e}")
     return None
 
-def generate_response(prompt):
+def generate_response(prompt, image_b64=None):
     print("Thinking...")
+    messages = [
+        {
+            'role': 'system',
+            'content': CURRENT_PERSONA,
+        }
+    ]
+    
+    user_message = {
+        'role': 'user',
+        'content': prompt,
+    }
+    
+    if image_b64:
+        user_message['images'] = [image_b64]
+        
+    messages.append(user_message)
+    
     try:
-        response = ollama.chat(model=MODEL_NAME, messages=[
-            {
-                'role': 'system',
-                'content': PERSONA,
-            },
-            {
-                'role': 'user',
-                'content': prompt,
-            },
-        ])
+        response = ollama.chat(model=MODEL_NAME, messages=messages)
         reply = response['message']['content']
         print(f"[AI]: {reply}")
         return reply
     except Exception as e:
-        print(f"\n[Ollama Error]: Make sure Ollama is running locally and you have pulled the '{MODEL_NAME}' model. Error: {e}")
+        print(f"\n[Ollama Error]: Make sure Ollama is running and you have pulled '{MODEL_NAME}'. Run 'ollama run {MODEL_NAME}'. Error: {e}")
         return None
 
 async def speak_text(text):
@@ -59,35 +107,42 @@ async def speak_text(text):
     try:
         # Generate audio file
         audio_file = "response.mp3"
-        communicate = edge_tts.Communicate(text, VOICE)
+        communicate = edge_tts.Communicate(text, CURRENT_VOICE)
         await communicate.save(audio_file)
         
-        # Play the audio file using pygame
-        pygame.mixer.init()
-        pygame.mixer.music.load(audio_file)
-        pygame.mixer.music.play()
+        # Play the audio file using ffplay
+        subprocess.run(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_file])
         
-        # Wait for the audio to finish playing
-        while pygame.mixer.music.get_busy():
-            pygame.time.Clock().tick(10)
-            
         # Clean up
-        pygame.mixer.quit()
         os.remove(audio_file)
     except Exception as e:
         print(f"\n[TTS Error]: {e}")
 
 def main():
-    print("Initializing AI Companion (Free Stack)...")
+    global CURRENT_PERSONA, CURRENT_VOICE
+    
+    print("=== AI Companion Setup ===")
+    print("Choose your character:")
+    for key, char in CHARACTERS.items():
+        print(f"{key}. {char['name']}")
+    
+    choice = input("\nEnter number (1-4): ").strip()
+    if choice not in CHARACTERS:
+        print("Invalid choice, defaulting to 4 (Freaky Gamer).")
+        choice = "4"
+        
+    selected_char = CHARACTERS[choice]
+    CURRENT_PERSONA = selected_char["persona"]
+    CURRENT_VOICE = selected_char["voice"]
+    
+    print(f"\nInitializing {selected_char['name']}...")
     
     # Initialize speech recognition
     recognizer = sr.Recognizer()
     microphone = sr.Microphone()
-    
-    # Pre-configure pygame mixer to reduce startup latency later
-    pygame.mixer.init()
 
-    print(f"\nSetup Complete! Ensure Ollama is running in the background.")
+    print(f"\nSetup Complete! Ensure Ollama is running.")
+    print(f"Make sure you run: ollama run {MODEL_NAME}")
     print("Ready to talk. Press Ctrl+C to exit.\n")
 
     try:
@@ -96,11 +151,14 @@ def main():
             user_text = listen_audio(recognizer, microphone)
             
             if user_text:
-                # 2. Think
-                ai_reply = generate_response(user_text)
+                # 2. See (Capture screen right after user speaks to see what they are talking about)
+                image_b64 = capture_screen()
+                
+                # 3. Think
+                ai_reply = generate_response(user_text, image_b64)
                 
                 if ai_reply:
-                    # 3. Speak (Run the async function synchronously)
+                    # 4. Speak
                     asyncio.run(speak_text(ai_reply))
                     
             time.sleep(0.1)
