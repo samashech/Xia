@@ -1,0 +1,14 @@
+# Environments
+venv/
+.env
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Audio/Video temporary files
+*.mp3
+*.wav
+*.mp4
+response.mp3
