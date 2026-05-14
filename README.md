@@ -25,7 +25,7 @@ Before running the companion, ensure you have the following installed on your sy
     *   **macOS:** `brew install ffmpeg`
     *   **Windows:** Download from the [official site](https://ffmpeg.org/download.html) or use `winget install ffmpeg`.
 
-## Installation
+## Installation process
 
 1.  Clone or download this repository.
 2.  Navigate to the project directory:
