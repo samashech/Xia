@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Xia AI Companion</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Xia AI Companion</h1>
+            <p>Select a character and start talking.</p>
+        </header>
+
+        <section class="characters" id="character-grid">
+            <!-- Populated by JS -->
+        </section>
+
+        <section class="chat-area">
+            <div class="chat-log" id="chat-log">
+                <div class="message system">System: Waiting for input...</div>
+            </div>
+            
+            <div class="controls">
+                <button id="mic-btn" class="mic-btn" disabled>
+                    <span class="mic-icon">🎙️</span>
+                    <span class="mic-text">Hold to Talk</span>
+                </button>
+                <div id="status-indicator" class="status-indicator">Idle</div>
+            </div>
+        </section>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

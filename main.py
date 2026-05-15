@@ -1,14 +1,16 @@
 import os
-import time
 import asyncio
-import pyaudio
+import base64
+import subprocess
 import speech_recognition as sr
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 import edge_tts
 import ollama
-import subprocess
-import base64
-import io
-from PIL import ImageGrab
+
+app = FastAPI()
 
 # Define characters (Persona + Voice)
 CHARACTERS = {
@@ -28,143 +30,111 @@ CHARACTERS = {
         "persona": "You are a posh, slightly condescending, but elegant British lady AI. You find humans amusing but assist them anyway. Keep answers brief. No markdown."
     },
     "4": {
-        "name": "Freaky Gamer (Like the Video)",
+        "name": "Freaky Gamer",
         "voice": "en-US-AriaNeural",
-        "persona": "You are a highly chaotic, freaky, and completely unhinged AI gaming companion watching my screen. You constantly make weird, slightly inappropriate, or sarcastic comments about my gameplay and what you see. You are a biohazard yourself. Keep responses under 2 sentences. Be funny and disruptive. Talk directly to me. No markdown."
+        "persona": "You are a highly chaotic, freaky, and completely unhinged AI gaming companion watching my screen. You constantly make weird, slightly inappropriate, or sarcastic comments. Keep responses under 2 sentences. Be funny and disruptive. Talk directly to me. No markdown."
     }
 }
 
-# Use a vision model for screen context
-MODEL_NAME = "llama3.2-vision"
+# Use a conversational text model
+MODEL_NAME = "llama3.1"
 
-# Global variables for selected character
-CURRENT_PERSONA = ""
-CURRENT_VOICE = ""
+# Initialize speech recognizer
+recognizer = sr.Recognizer()
 
-def capture_screen():
-    print("Taking screenshot...")
-    try:
-        screen = ImageGrab.grab()
-        buffered = io.BytesIO()
-        # Compress the image a bit so the local vision model can process it faster
-        screen.convert("RGB").save(buffered, format="JPEG", quality=50)
-        img_bytes = buffered.getvalue()
-        return base64.b64encode(img_bytes).decode('utf-8')
-    except Exception as e:
-        print(f"[Screen Capture Error]: {e}")
-        return None
+class ChatRequest(BaseModel):
+    character_id: str
+    text: str
 
-def listen_audio(recognizer, microphone):
-    print("Listening...")
-    with microphone as source:
-        # Adjust for background noise quickly
-        recognizer.adjust_for_ambient_noise(source, duration=0.5)
-        try:
-            audio = recognizer.listen(source, timeout=5, phrase_time_limit=10)
-            text = recognizer.recognize_google(audio)
-            print(f"\n[You]: {text}")
-            return text
-        except sr.WaitTimeoutError:
-            pass
-        except sr.UnknownValueError:
-            pass
-        except sr.RequestError as e:
-            print(f"\n[Error]: Speech Recognition API Error: {e}")
-        except Exception as e:
-            print(f"\n[Error]: {e}")
-    return None
+@app.get("/api/characters")
+def get_characters():
+    return CHARACTERS
 
-def generate_response(prompt, image_b64=None):
-    print("Thinking...")
-    messages = [
-        {
-            'role': 'system',
-            'content': CURRENT_PERSONA,
-        }
-    ]
-    
-    user_message = {
-        'role': 'user',
-        'content': prompt,
-    }
-    
-    if image_b64:
-        user_message['images'] = [image_b64]
+@app.post("/api/chat")
+async def chat(request: ChatRequest):
+    return await process_chat(request.character_id, request.text)
+
+@app.post("/api/chat_audio")
+async def chat_audio(character_id: str = Form(...), audio: UploadFile = File(...)):
+    char = CHARACTERS.get(character_id)
+    if not char:
+        raise HTTPException(status_code=400, detail="Invalid character ID")
         
-    messages.append(user_message)
+    input_file = f"temp_in_{id(audio)}.webm"
+    wav_file = f"temp_out_{id(audio)}.wav"
     
+    try:
+        # Save uploaded file
+        with open(input_file, "wb") as f:
+            content = await audio.read()
+            f.write(content)
+            
+        # Convert to WAV using ffmpeg
+        subprocess.run(["ffmpeg", "-y", "-i", input_file, "-ar", "16000", "-ac", "1", wav_file], 
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                       
+        # Transcribe
+        with sr.AudioFile(wav_file) as source:
+            audio_data = recognizer.record(source)
+            text = recognizer.recognize_google(audio_data)
+            
+    except sr.UnknownValueError:
+        raise HTTPException(status_code=400, detail="Could not understand the audio. Please speak clearer.")
+    except Exception as e:
+        print(f"Transcription Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process audio.")
+    finally:
+        # Cleanup
+        if os.path.exists(input_file): os.remove(input_file)
+        if os.path.exists(wav_file): os.remove(wav_file)
+        
+    # Process the text as usual
+    return await process_chat(character_id, text)
+
+async def process_chat(character_id: str, text: str):
+    char = CHARACTERS.get(character_id)
+    if not char:
+        raise HTTPException(status_code=400, detail="Invalid character ID")
+        
+    # 1. Think with Ollama
+    messages = [
+        {'role': 'system', 'content': char["persona"]},
+        {'role': 'user', 'content': text}
+    ]
     try:
         response = ollama.chat(model=MODEL_NAME, messages=messages)
-        reply = response['message']['content']
-        print(f"[AI]: {reply}")
-        return reply
+        ai_reply = response['message']['content']
     except Exception as e:
-        print(f"\n[Ollama Error]: Make sure Ollama is running and you have pulled '{MODEL_NAME}'. Run 'ollama run {MODEL_NAME}'. Error: {e}")
-        return None
-
-async def speak_text(text):
-    print("Speaking...")
+        print(f"Ollama Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Ollama Error: Make sure {MODEL_NAME} is pulled and running.")
+        
+    # 2. Generate Audio with edge-tts
+    audio_file = f"response_{id(text)}.mp3"
     try:
-        # Generate audio file
-        audio_file = "response.mp3"
-        communicate = edge_tts.Communicate(text, CURRENT_VOICE)
+        communicate = edge_tts.Communicate(ai_reply, char["voice"])
         await communicate.save(audio_file)
         
-        # Play the audio file using ffplay
-        subprocess.run(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_file])
-        
-        # Clean up
-        os.remove(audio_file)
+        with open(audio_file, "rb") as f:
+            audio_bytes = f.read()
+        audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
     except Exception as e:
-        print(f"\n[TTS Error]: {e}")
-
-def main():
-    global CURRENT_PERSONA, CURRENT_VOICE
-    
-    print("=== AI Companion Setup ===")
-    print("Choose your character:")
-    for key, char in CHARACTERS.items():
-        print(f"{key}. {char['name']}")
-    
-    choice = input("\nEnter number (1-4): ").strip()
-    if choice not in CHARACTERS:
-        print("Invalid choice, defaulting to 4 (Freaky Gamer).")
-        choice = "4"
-        
-    selected_char = CHARACTERS[choice]
-    CURRENT_PERSONA = selected_char["persona"]
-    CURRENT_VOICE = selected_char["voice"]
-    
-    print(f"\nInitializing {selected_char['name']}...")
-    
-    # Initialize speech recognition
-    recognizer = sr.Recognizer()
-    microphone = sr.Microphone()
-
-    print(f"\nSetup Complete! Ensure Ollama is running.")
-    print(f"Make sure you run: ollama run {MODEL_NAME}")
-    print("Ready to talk. Press Ctrl+C to exit.\n")
-
-    try:
-        while True:
-            # 1. Listen
-            user_text = listen_audio(recognizer, microphone)
+        print(f"TTS Error: {e}")
+        raise HTTPException(status_code=500, detail="Text-to-speech generation failed.")
+    finally:
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
             
-            if user_text:
-                # 2. See (Capture screen right after user speaks to see what they are talking about)
-                image_b64 = capture_screen()
-                
-                # 3. Think
-                ai_reply = generate_response(user_text, image_b64)
-                
-                if ai_reply:
-                    # 4. Speak
-                    asyncio.run(speak_text(ai_reply))
-                    
-            time.sleep(0.1)
-            
-    except KeyboardInterrupt:
-        print("\nExiting AI Companion.")
+    return {"text": ai_reply, "audio_b64": audio_b64, "user_text": text}
+
+# Mount static directory for the frontend
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/", response_class=HTMLResponse)
+async def read_index():
+    with open("static/index.html", "r") as f:
+        return f.read()
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    print("Starting AI Companion Web Server on http://localhost:8000")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
