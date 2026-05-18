@@ -162,5 +162,5 @@ function addMessage(type, text) {
     chatLog.scrollTop = chatLog.scrollHeight;
 }
 
-// Init
+
 fetchCharacters();
